@@ -4,9 +4,10 @@ import com.charity_hub.domain.contracts.IAccountRepo;
 import com.charity_hub.domain.contracts.IAuthProvider;
 import com.charity_hub.domain.contracts.IInvitationRepo;
 import com.charity_hub.domain.contracts.IJWTGenerator;
-import com.charity_hub.domain.models.account.Tokens;
 import com.charity_hub.domain.models.account.Account;
+import com.charity_hub.domain.models.account.Tokens;
 import com.charity_hub.domain.exceptions.AppException;
+import com.charity_hub.domain.services.AccountDomainService;  // <-- Import domain service
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -22,6 +23,9 @@ public class AuthenticateHandler {
 
     private final Logger logger = LoggerFactory.getLogger(this.getClass().getSimpleName());
 
+    // Domain service instance
+    private final AccountDomainService accountDomainService;
+
     public AuthenticateHandler(
             IAccountRepo accountRepo,
             IInvitationRepo invitationRepo,
@@ -32,6 +36,10 @@ public class AuthenticateHandler {
         this.invitationRepo = invitationRepo;
         this.authProvider = authProvider;
         this.jwtGenerator = jwtGenerator;
+
+        // Domain service has no external dependencies,
+        // so we can instantiate it directly
+        this.accountDomainService = new AccountDomainService();
     }
 
     public CompletableFuture<AuthenticateResponse> handle(Authenticate command) {
@@ -39,12 +47,9 @@ public class AuthenticateHandler {
             logger.info("Handling authentication for idToken: {}", command.idToken());
 
             String mobileNumber = authProvider.getVerifiedMobileNumber(command.idToken()).join();
-
-            logger.info("check for account: {}", command);
+            logger.info("Verified mobile number: {}", mobileNumber);
 
             Account account = existingAccountOrNewAccount(mobileNumber, command);
-
-            logger.info(" finish check for account: {}", command.idToken());
 
             Tokens tokens = account.authenticate(jwtGenerator, command.deviceId(), command.deviceType());
 
@@ -56,11 +61,13 @@ public class AuthenticateHandler {
     }
 
     private Account existingAccountOrNewAccount(String mobileNumber, Authenticate request) {
-        logger.info("get the account by mobile number");
+        logger.info("Attempting to find account by mobile number: {}", mobileNumber);
+
         var account = accountRepo.getByMobileNumber(mobileNumber).join();
         if (accountExists(account)) {
             return account;
         }
+
         return createNewAccount(mobileNumber, request.deviceType(), request.deviceId());
     }
 
@@ -68,18 +75,16 @@ public class AuthenticateHandler {
         return existingAccount != null;
     }
 
-    private Account createNewAccount(String mobileNumber, String aDeviceType, String aDeviceId) {
+    private Account createNewAccount(String mobileNumber, String deviceType, String deviceId) {
         boolean isAdmin = accountRepo.isAdmin(mobileNumber).join();
-        boolean hasNoInvitations = !invitationRepo.hasInvitation(mobileNumber).join();
-        assertIsAdminOrInvited(mobileNumber, isAdmin, hasNoInvitations);
+        boolean hasInvitation = invitationRepo.hasInvitation(mobileNumber).join();
 
-        return Account.newAccount(mobileNumber, isAdmin, aDeviceType, aDeviceId);
-    }
-
-    private void assertIsAdminOrInvited(String mobileNumber, boolean isAdmin, boolean hasNoInvitations) {
-        if (!isAdmin && hasNoInvitations) {
-            logger.warn("Account not invited: {}", mobileNumber);
-            throw new AppException.RequirementException("Account not invited to use the App");
-        }
+        return accountDomainService.createNewAccount(
+            mobileNumber, 
+            isAdmin, 
+            hasInvitation, 
+            deviceType, 
+            deviceId
+        );
     }
 }
